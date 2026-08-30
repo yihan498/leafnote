@@ -6,7 +6,7 @@ on:
       validation_tag:
         description: Draft validation release tag
         required: true
-        default: validation-v1.3.15
+        default: validation-v1.4.0
 
 permissions:
   contents: none
@@ -31,8 +31,8 @@ jobs:
           $release = $releases | Where-Object tag_name -eq $env:VALIDATION_TAG | Select-Object -First 1
           if (-not $release -or -not $release.draft) { throw 'Validation draft release missing' }
           $expected = @{
-            'LeafNote-1.3.15-Windows-x64-Setup-final-r5.exe' = '4F19A769F03181F36FC07154017FEC4469843F52E0671E82B63E3E19ADE58379'
-            'LeafNote-1.3.15-Windows-x64-Portable-final-r5.exe' = '506DAA0ACC8240A46524E26E3F71EE17C755715955B80A6999281426744BA458'
+            'LeafNote-1.4.0-Windows-x64-Setup.exe' = '90D810AC25FD9242EA03C5EDB8B4922BD7C0CD76CD8300B7A529D8FF88626878'
+            'LeafNote-1.4.0-Windows-x64-Portable.exe' = '11334B316B91B7DCA32534DFFF738D7C810F9ED6497BFF227E4E56F979383D09'
             'Note-App-1.3.6-Windows-x64-Setup.exe' = 'F6DF23B28B3C8A462FCFFEB199A3C2F3552E4DDC59A3018EE8C15BEF72591C06'
           }
           foreach ($name in $expected.Keys) {
@@ -74,8 +74,8 @@ jobs:
           $watchdogEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($watchdogBody))
           $watchdog = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-NonInteractive','-EncodedCommand',$watchdogEncoded) -PassThru -WindowStyle Hidden
           try {
-          $setup = Join-Path $env:RUNNER_TEMP 'LeafNote-1.3.15-Windows-x64-Setup-final-r5.exe'
-          $portable = Join-Path $env:RUNNER_TEMP 'LeafNote-1.3.15-Windows-x64-Portable-final-r5.exe'
+          $setup = Join-Path $env:RUNNER_TEMP 'LeafNote-1.4.0-Windows-x64-Setup.exe'
+          $portable = Join-Path $env:RUNNER_TEMP 'LeafNote-1.4.0-Windows-x64-Portable.exe'
           $setupSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $setup).Hash
           $signature = Get-AuthenticodeSignature -LiteralPath $setup
           if ($signature.Status -ne 'NotSigned') { throw "Expected unsigned build, got $($signature.Status)" }
@@ -85,13 +85,13 @@ jobs:
           Start-Sleep -Seconds 4
           $entry = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' |
             Where-Object DisplayName -eq 'LeafNote' | Select-Object -First 1
-          if (-not $entry -or $entry.DisplayVersion -ne '1.3.15') { throw 'LeafNote uninstall registration/version missing' }
+          if (-not $entry -or $entry.DisplayVersion -ne '1.4.0') { throw 'LeafNote uninstall registration/version missing' }
           if ($entry.UninstallString -match '^"([^"]+)"') { $uninstaller = $Matches[1] } else { $uninstaller = $entry.UninstallString }
           $installDir = Split-Path -Parent $uninstaller
           $app = Get-ChildItem -LiteralPath $installDir -Filter '*.exe' |
             Where-Object { $_.Name -notmatch 'unins|uninstall' -and $_.VersionInfo.ProductName -eq 'LeafNote' } |
             Select-Object -First 1
-          if (-not $app -or $app.VersionInfo.ProductVersion -ne '1.3.15') { throw 'Installed LeafNote PE metadata mismatch' }
+          if (-not $app -or $app.VersionInfo.ProductVersion -ne '1.4.0') { throw 'Installed LeafNote PE metadata mismatch' }
           $portableSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $portable).Hash
           $appSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $app.FullName).Hash
           $links = @(Get-ChildItem ([Environment]::GetFolderPath('Desktop')),(Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu') -Filter 'LeafNote*.lnk' -Recurse -ErrorAction SilentlyContinue)
@@ -182,7 +182,7 @@ jobs:
           [pscustomobject]@{
             schemaVersion=1; scenario='fresh-install-ui-save-uninstall'; repo=$env:GITHUB_REPOSITORY
             runId=$env:GITHUB_RUN_ID; headSha=$env:GITHUB_SHA; validationTag=$env:VALIDATION_TAG
-            product='LeafNote'; version='1.3.15'; setupSha=$setupSha; portableSha=$portableSha; appSha=$appSha; signature=$signature.Status.ToString()
+            product='LeafNote'; version='1.4.0'; setupSha=$setupSha; portableSha=$portableSha; appSha=$appSha; signature=$signature.Status.ToString()
             installerExitCode=$installer.ExitCode; uninstallerExitCode=$uninstall.ExitCode
             appPath=$app.FullName; notePath=$saved.FullName; noteSha=$noteSha
             titleFound=$true; bodyFound=$true; markdownPreserved=$true; shortcutRemoved=$true
@@ -221,11 +221,11 @@ jobs:
           $watchdogEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($watchdogBody))
           $watchdog = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-NonInteractive','-EncodedCommand',$watchdogEncoded) -PassThru -WindowStyle Hidden
           try {
-          $portable = Join-Path $env:RUNNER_TEMP 'LeafNote-1.3.15-Windows-x64-Portable-final-r5.exe'
+          $portable = Join-Path $env:RUNNER_TEMP 'LeafNote-1.4.0-Windows-x64-Portable.exe'
           $portableSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $portable).Hash
-          if ($portableSha -ne '506DAA0ACC8240A46524E26E3F71EE17C755715955B80A6999281426744BA458') { throw "Portable SHA mismatch: $portableSha" }
+          if ($portableSha -ne '11334B316B91B7DCA32534DFFF738D7C810F9ED6497BFF227E4E56F979383D09') { throw "Portable SHA mismatch: $portableSha" }
           $version = (Get-Item -LiteralPath $portable).VersionInfo
-          if ($version.ProductName -ne 'LeafNote' -or $version.ProductVersion -ne '1.3.15') { throw 'Portable PE metadata mismatch' }
+          if ($version.ProductName -ne 'LeafNote' -or $version.ProductVersion -ne '1.4.0') { throw 'Portable PE metadata mismatch' }
           $signature = Get-AuthenticodeSignature -LiteralPath $portable
           if ($signature.Status -ne 'NotSigned') { throw "Expected unsigned Portable, got $($signature.Status)" }
           $library = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Note App Library'
@@ -286,7 +286,7 @@ jobs:
           [pscustomobject]@{
             schemaVersion=1; scenario='portable-ui-save'; repo=$env:GITHUB_REPOSITORY
             runId=$env:GITHUB_RUN_ID; headSha=$env:GITHUB_SHA; validationTag=$env:VALIDATION_TAG
-            product='LeafNote'; version='1.3.15'; portableSha=$portableSha; signature=$signature.Status.ToString()
+            product='LeafNote'; version='1.4.0'; portableSha=$portableSha; signature=$signature.Status.ToString()
             notePath=$saved.FullName; noteSha=$noteSha; titleFound=$true; bodyFound=$true; normalExit=$true
             recordedAt=(Get-Date).ToUniversalTime().ToString('o')
           } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'portable-evidence.json') -Encoding UTF8
@@ -316,7 +316,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $old = Join-Path $env:RUNNER_TEMP 'Note-App-1.3.6-Windows-x64-Setup.exe'
-          $new = Join-Path $env:RUNNER_TEMP 'LeafNote-1.3.15-Windows-x64-Setup-final-r5.exe'
+          $new = Join-Path $env:RUNNER_TEMP 'LeafNote-1.4.0-Windows-x64-Setup.exe'
           $oldInstaller = Start-Process -FilePath $old -ArgumentList '/S' -PassThru -Wait
           if ($oldInstaller.ExitCode -ne 0) { throw "1.3.6 installer exit code $($oldInstaller.ExitCode)" }
           $oldEntry = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' |
@@ -331,8 +331,8 @@ jobs:
           if ($newInstaller.ExitCode -ne 0) { throw "LeafNote installer exit code $($newInstaller.ExitCode)" }
           Start-Sleep -Seconds 4
           $entry = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' |
-            Where-Object { $_.DisplayName -eq 'LeafNote' -and $_.DisplayVersion -eq '1.3.15' } | Select-Object -First 1
-          if (-not $entry) { throw 'Upgrade did not replace registration with LeafNote 1.3.15' }
+            Where-Object { $_.DisplayName -eq 'LeafNote' -and $_.DisplayVersion -eq '1.4.0' } | Select-Object -First 1
+          if (-not $entry) { throw 'Upgrade did not replace registration with LeafNote 1.4.0' }
           if (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' | Where-Object DisplayName -eq 'Note App') { throw 'Old Note App registration remained after upgrade' }
           $noteShaAfterUpgrade = (Get-FileHash -Algorithm SHA256 -LiteralPath $note).Hash
           if ($noteShaAfterUpgrade -ne $noteShaBefore) { throw 'Upgrade changed existing Markdown' }
@@ -341,7 +341,7 @@ jobs:
           $app = Get-ChildItem -LiteralPath $installDir -Filter '*.exe' |
             Where-Object { $_.Name -notmatch 'unins|uninstall' -and $_.VersionInfo.ProductName -eq 'LeafNote' } |
             Select-Object -First 1
-          if (-not $app -or $app.VersionInfo.ProductVersion -ne '1.3.15') { throw 'Upgrade executable metadata mismatch' }
+          if (-not $app -or $app.VersionInfo.ProductVersion -ne '1.4.0') { throw 'Upgrade executable metadata mismatch' }
           $process = Start-Process -FilePath $app.FullName -PassThru
           Start-Sleep -Seconds 8
           if ($process.HasExited) { throw "Upgraded LeafNote exited early with $($process.ExitCode)" }
@@ -351,7 +351,7 @@ jobs:
           $noteShaAfter = (Get-FileHash -Algorithm SHA256 -LiteralPath $note).Hash
           if ($noteShaAfter -ne $noteShaBefore) { throw 'Uninstall changed or deleted Markdown' }
           [pscustomobject]@{
-            schemaVersion=1; scenario='upgrade-1.3.6-to-1.3.15-uninstall'; repo=$env:GITHUB_REPOSITORY
+            schemaVersion=1; scenario='upgrade-1.3.6-to-1.4.0-uninstall'; repo=$env:GITHUB_REPOSITORY
             runId=$env:GITHUB_RUN_ID; headSha=$env:GITHUB_SHA; validationTag=$env:VALIDATION_TAG
             oldDisplayName=$oldEntry.DisplayName; oldDisplayVersion=$oldEntry.DisplayVersion
             newDisplayName=$entry.DisplayName; newDisplayVersion=$entry.DisplayVersion
