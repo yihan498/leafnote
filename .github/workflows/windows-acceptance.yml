@@ -9,7 +9,7 @@ on:
         default: validation-v1.3.15
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   fresh-install:
@@ -28,20 +28,26 @@ jobs:
           $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases?per_page=100" -Headers $headers
           $release = $releases | Where-Object tag_name -eq $env:VALIDATION_TAG | Select-Object -First 1
           if (-not $release -or -not $release.draft) { throw 'Validation draft release missing' }
-          $asset = $release.assets | Where-Object name -eq 'LeafNote-1.3.15-Windows-x64-Setup-final-r5.exe' | Select-Object -First 1
-          if (-not $asset) { throw 'LeafNote setup asset missing' }
-          $headers.Accept = 'application/octet-stream'
-          $destination = Join-Path $env:RUNNER_TEMP $asset.name
-          Invoke-WebRequest -Uri $asset.url -Headers $headers -OutFile $destination -UseBasicParsing
-          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash
-          $expected = '4F19A769F03181F36FC07154017FEC4469843F52E0671E82B63E3E19ADE58379'
-          if ($actual -ne $expected) { throw "New setup SHA mismatch: $actual" }
+          $expected = @{
+            'LeafNote-1.3.15-Windows-x64-Setup-final-r5.exe' = '4F19A769F03181F36FC07154017FEC4469843F52E0671E82B63E3E19ADE58379'
+            'LeafNote-1.3.15-Windows-x64-Portable-final-r5.exe' = '506DAA0ACC8240A46524E26E3F71EE17C755715955B80A6999281426744BA458'
+          }
+          foreach ($name in $expected.Keys) {
+            $asset = $release.assets | Where-Object name -eq $name | Select-Object -First 1
+            if (-not $asset) { throw "Validation asset missing: $name" }
+            $headers.Accept = 'application/octet-stream'
+            $destination = Join-Path $env:RUNNER_TEMP $name
+            Invoke-WebRequest -Uri $asset.url -Headers $headers -OutFile $destination -UseBasicParsing
+            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash
+            if ($actual -ne $expected[$name]) { throw "$name SHA mismatch: $actual" }
+          }
       - name: Install, save title and body through UI, and uninstall
         shell: powershell
         timeout-minutes: 5
         run: |
           $ErrorActionPreference = 'Stop'
           $setup = Join-Path $env:RUNNER_TEMP 'LeafNote-1.3.15-Windows-x64-Setup-final-r5.exe'
+          $portable = Join-Path $env:RUNNER_TEMP 'LeafNote-1.3.15-Windows-x64-Portable-final-r5.exe'
           $setupSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $setup).Hash
           $signature = Get-AuthenticodeSignature -LiteralPath $setup
           if ($signature.Status -ne 'NotSigned') { throw "Expected unsigned build, got $($signature.Status)" }
@@ -57,6 +63,9 @@ jobs:
             Where-Object { $_.Name -notmatch 'unins|uninstall' -and $_.VersionInfo.ProductName -eq 'LeafNote' } |
             Select-Object -First 1
           if (-not $app -or $app.VersionInfo.ProductVersion -ne '1.3.15') { throw 'Installed LeafNote PE metadata mismatch' }
+          $portableSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $portable).Hash
+          $appSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $app.FullName).Hash
+          if ($appSha -ne $portableSha) { throw "installed executable does not match R5 Portable: $appSha != $portableSha" }
           $links = @(Get-ChildItem ([Environment]::GetFolderPath('Desktop')),(Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu') -Filter 'LeafNote*.lnk' -Recurse -ErrorAction SilentlyContinue)
           if ($links.Count -lt 1) { throw 'LeafNote shortcut missing' }
           $associationKeys = @(
@@ -138,13 +147,13 @@ jobs:
           [pscustomobject]@{
             schemaVersion=1; scenario='fresh-install-ui-save-uninstall'; repo=$env:GITHUB_REPOSITORY
             runId=$env:GITHUB_RUN_ID; headSha=$env:GITHUB_SHA; validationTag=$env:VALIDATION_TAG
-            product='LeafNote'; version='1.3.15'; setupSha=$setupSha; signature=$signature.Status.ToString()
+            product='LeafNote'; version='1.3.15'; setupSha=$setupSha; portableSha=$portableSha; appSha=$appSha; signature=$signature.Status.ToString()
             installerExitCode=$installer.ExitCode; uninstallerExitCode=$uninstall.ExitCode
             appPath=$app.FullName; notePath=$saved.FullName; noteSha=$noteSha
             titleFound=$true; bodyFound=$true; markdownPreserved=$true; shortcutRemoved=$true
             recordedAt=(Get-Date).ToUniversalTime().ToString('o')
           } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'fresh-evidence.json') -Encoding UTF8
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: acceptance-evidence-fresh
           path: ${{ runner.temp }}\fresh-evidence.json
@@ -230,7 +239,7 @@ jobs:
             noteShaBefore=$noteShaBefore; noteShaAfterUpgrade=$noteShaAfterUpgrade; noteShaAfter=$noteShaAfter
             markdownPreserved=$true; recordedAt=(Get-Date).ToUniversalTime().ToString('o')
           } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'upgrade-evidence.json') -Encoding UTF8
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: acceptance-evidence-upgrade
           path: ${{ runner.temp }}\upgrade-evidence.json
