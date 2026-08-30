@@ -214,14 +214,15 @@ jobs:
         timeout-minutes: 5
         run: |
           $ErrorActionPreference = 'Stop'
+          $portable = Join-Path $env:RUNNER_TEMP 'LeafNote-1.4.0-Windows-x64-Portable.exe'
+          $env:LEAFNOTE_WATCHDOG_EXECUTABLE = $portable
           $env:LEAFNOTE_WATCHDOG_PARENT_PID = [string]$PID
           $env:ACCEPTANCE_WATCHDOG_SECONDS = '240'
           $env:LEAFNOTE_WATCHDOG_SECONDS = $env:ACCEPTANCE_WATCHDOG_SECONDS
-          $watchdogBody = '$parentPid = [int]$env:LEAFNOTE_WATCHDOG_PARENT_PID' + "`n" + '$seconds = [int]$env:LEAFNOTE_WATCHDOG_SECONDS' + "`n" + 'Start-Sleep -Seconds $seconds' + "`n" + 'Stop-Process -Id $parentPid -Force -ErrorAction SilentlyContinue'
+          $watchdogBody = '$parentPid = [int]$env:LEAFNOTE_WATCHDOG_PARENT_PID' + "`n" + '$seconds = [int]$env:LEAFNOTE_WATCHDOG_SECONDS' + "`n" + '$executable = $env:LEAFNOTE_WATCHDOG_EXECUTABLE' + "`n" + 'Start-Sleep -Seconds $seconds' + "`n" + 'Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object ExecutablePath -eq $executable | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }' + "`n" + 'Stop-Process -Id $parentPid -Force -ErrorAction SilentlyContinue'
           $watchdogEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($watchdogBody))
           $watchdog = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-NonInteractive','-EncodedCommand',$watchdogEncoded) -PassThru -WindowStyle Hidden
           try {
-          $portable = Join-Path $env:RUNNER_TEMP 'LeafNote-1.4.0-Windows-x64-Portable.exe'
           $portableSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $portable).Hash
           if ($portableSha -ne '11334B316B91B7DCA32534DFFF738D7C810F9ED6497BFF227E4E56F979383D09') { throw "Portable SHA mismatch: $portableSha" }
           $version = (Get-Item -LiteralPath $portable).VersionInfo
@@ -291,6 +292,7 @@ jobs:
             recordedAt=(Get-Date).ToUniversalTime().ToString('o')
           } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'portable-evidence.json') -Encoding UTF8
           } finally {
+            if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
             if ($watchdog -and -not $watchdog.HasExited) { Stop-Process -Id $watchdog.Id -Force -ErrorAction SilentlyContinue }
           }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
