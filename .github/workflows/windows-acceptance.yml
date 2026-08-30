@@ -9,19 +9,21 @@ on:
         default: validation-v1.3.15
 
 permissions:
-  contents: read
+  contents: none
 
 jobs:
-  fresh-install:
+  prepare-assets:
     runs-on: windows-latest
-    timeout-minutes: 20
-    env:
-      GH_TOKEN: ${{ github.token }}
-      VALIDATION_TAG: ${{ inputs.validation_tag }}
+    timeout-minutes: 10
+    permissions:
+      contents: write # Draft releases require push-level access; this job never runs LeafNote.
     steps:
-      - name: Download and verify new installer from validation draft
+      - name: Download and verify validation binaries
         shell: powershell
         timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VALIDATION_TAG: ${{ inputs.validation_tag }}
         run: |
           $ErrorActionPreference = 'Stop'
           $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'User-Agent' = 'LeafNote-Acceptance' }
@@ -31,6 +33,7 @@ jobs:
           $expected = @{
             'LeafNote-1.3.15-Windows-x64-Setup-final-r5.exe' = '4F19A769F03181F36FC07154017FEC4469843F52E0671E82B63E3E19ADE58379'
             'LeafNote-1.3.15-Windows-x64-Portable-final-r5.exe' = '506DAA0ACC8240A46524E26E3F71EE17C755715955B80A6999281426744BA458'
+            'Note-App-1.3.6-Windows-x64-Setup.exe' = 'F6DF23B28B3C8A462FCFFEB199A3C2F3552E4DDC59A3018EE8C15BEF72591C06'
           }
           foreach ($name in $expected.Keys) {
             $asset = $release.assets | Where-Object name -eq $name | Select-Object -First 1
@@ -41,7 +44,22 @@ jobs:
             $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash
             if ($actual -ne $expected[$name]) { throw "$name SHA mismatch: $actual" }
           }
-      - name: Install, save title and body through UI, and uninstall
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: validation-binaries
+          path: ${{ runner.temp }}\*.exe
+          retention-days: 1
+  fresh-install:
+    needs: prepare-assets
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: none
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: validation-binaries
+          path: ${{ runner.temp }}      - name: Install, save title and body through UI, and uninstall
         shell: powershell
         timeout-minutes: 5
         run: |
@@ -159,35 +177,16 @@ jobs:
           path: ${{ runner.temp }}\fresh-evidence.json
 
   upgrade:
+    needs: prepare-assets
     runs-on: windows-latest
     timeout-minutes: 20
-    env:
-      GH_TOKEN: ${{ github.token }}
-      VALIDATION_TAG: ${{ inputs.validation_tag }}
+    permissions:
+      contents: none
     steps:
-      - name: Download and verify old and new installers from validation draft
-        shell: powershell
-        timeout-minutes: 5
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'User-Agent' = 'LeafNote-Acceptance' }
-          $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases?per_page=100" -Headers $headers
-          $release = $releases | Where-Object tag_name -eq $env:VALIDATION_TAG | Select-Object -First 1
-          if (-not $release -or -not $release.draft) { throw 'Validation draft release missing' }
-          $expected = @{
-            'LeafNote-1.3.15-Windows-x64-Setup-final-r5.exe' = '4F19A769F03181F36FC07154017FEC4469843F52E0671E82B63E3E19ADE58379'
-            'Note-App-1.3.6-Windows-x64-Setup.exe' = 'F6DF23B28B3C8A462FCFFEB199A3C2F3552E4DDC59A3018EE8C15BEF72591C06'
-          }
-          foreach ($name in $expected.Keys) {
-            $asset = $release.assets | Where-Object name -eq $name | Select-Object -First 1
-            if (-not $asset) { throw "Validation asset missing: $name" }
-            $headers.Accept = 'application/octet-stream'
-            $destination = Join-Path $env:RUNNER_TEMP $name
-            Invoke-WebRequest -Uri $asset.url -Headers $headers -OutFile $destination -UseBasicParsing
-            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash
-            if ($actual -ne $expected[$name]) { throw "$name SHA mismatch: $actual" }
-          }
-      - name: Upgrade 1.3.6, verify replacement, and preserve Markdown
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: validation-binaries
+          path: ${{ runner.temp }}      - name: Upgrade 1.3.6, verify replacement, and preserve Markdown
         shell: powershell
         timeout-minutes: 5
         run: |
