@@ -90,7 +90,8 @@ jobs:
           for ($i=0; $i -lt 20 -and $process.MainWindowHandle -eq 0; $i++) { $process.Refresh(); Start-Sleep -Milliseconds 250 }
           if ($process.MainWindowHandle -eq 0) { throw 'LeafNote main window handle was unavailable' }
           $windowElement = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
-          $bodyCondition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty, '笔记正文编辑器')
+          $bodyName = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('56yU6K6w5q2j5paH57yW6L6R5Zmo'))
+          $bodyCondition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty, $bodyName)
           $bodyElement = $null
           for ($i=0; $i -lt 20 -and -not $bodyElement; $i++) {
             $bodyElement = $windowElement.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $bodyCondition)
