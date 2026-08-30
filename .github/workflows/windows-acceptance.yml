@@ -2,6 +2,11 @@ name: Windows acceptance
 
 on:
   workflow_dispatch:
+    inputs:
+      validation_tag:
+        description: Draft validation release tag
+        required: true
+        default: validation-v1.3.15
 
 permissions:
   contents: read
@@ -9,57 +14,88 @@ permissions:
 jobs:
   fresh-install:
     runs-on: windows-latest
+    timeout-minutes: 20
     env:
       GH_TOKEN: ${{ github.token }}
+      VALIDATION_TAG: ${{ inputs.validation_tag }}
     steps:
-      - name: Download draft release
+      - name: Download and verify new installer from validation draft
         shell: powershell
         run: |
-          gh release download v1.3.15 --repo $env:GITHUB_REPOSITORY --pattern "LeafNote-1.3.15-Windows-x64-Setup.exe" --dir $env:RUNNER_TEMP
-      - name: Install, save through UI, and uninstall
+          $ErrorActionPreference = 'Stop'
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'User-Agent' = 'LeafNote-Acceptance' }
+          $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases?per_page=100" -Headers $headers
+          $release = $releases | Where-Object tag_name -eq $env:VALIDATION_TAG | Select-Object -First 1
+          if (-not $release -or -not $release.draft) { throw 'Validation draft release missing' }
+          $asset = $release.assets | Where-Object name -eq 'LeafNote-1.3.15-Windows-x64-Setup.exe' | Select-Object -First 1
+          if (-not $asset) { throw 'LeafNote setup asset missing' }
+          $headers.Accept = 'application/octet-stream'
+          $destination = Join-Path $env:RUNNER_TEMP $asset.name
+          Invoke-WebRequest -Uri $asset.url -Headers $headers -OutFile $destination -UseBasicParsing
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash
+          $expected = '0C1568B4EA05A2F45BA98FCCFC684C21A8AA498C2E59CE319B31613E173944DC'
+          if ($actual -ne $expected) { throw "New setup SHA mismatch: $actual" }
+      - name: Install, save title and body through UI, and uninstall
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $setup = Join-Path $env:RUNNER_TEMP 'LeafNote-1.3.15-Windows-x64-Setup.exe'
+          $setupSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $setup).Hash
           $signature = Get-AuthenticodeSignature -LiteralPath $setup
           if ($signature.Status -ne 'NotSigned') { throw "Expected unsigned build, got $($signature.Status)" }
-          Start-Process -FilePath $setup -ArgumentList '/S' -Wait
+          $installer = Start-Process -FilePath $setup -ArgumentList '/S' -PassThru -Wait
+          if ($installer.ExitCode -ne 0) { throw "Installer exit code $($installer.ExitCode)" }
           Start-Sleep -Seconds 4
           $entry = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' |
             Where-Object DisplayName -eq 'LeafNote' | Select-Object -First 1
-          if (-not $entry) { throw 'LeafNote uninstall registration missing' }
-          $uninstaller = $entry.UninstallString.Trim('"')
+          if (-not $entry -or $entry.DisplayVersion -ne '1.3.15') { throw 'LeafNote uninstall registration/version missing' }
+          if ($entry.UninstallString -match '^"([^"]+)"') { $uninstaller = $Matches[1] } else { $uninstaller = $entry.UninstallString }
           $installDir = Split-Path -Parent $uninstaller
           $app = Get-ChildItem -LiteralPath $installDir -Filter '*.exe' |
             Where-Object { $_.Name -notmatch 'unins|uninstall' -and $_.VersionInfo.ProductName -eq 'LeafNote' } |
             Select-Object -First 1
-          if (-not $app) { throw 'Installed LeafNote executable missing' }
-          if ($app.VersionInfo.ProductVersion -ne '1.3.15') { throw 'Installed version mismatch' }
+          if (-not $app -or $app.VersionInfo.ProductVersion -ne '1.3.15') { throw 'Installed LeafNote PE metadata mismatch' }
           $links = @(Get-ChildItem ([Environment]::GetFolderPath('Desktop')),(Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu') -Filter 'LeafNote*.lnk' -Recurse -ErrorAction SilentlyContinue)
           if ($links.Count -lt 1) { throw 'LeafNote shortcut missing' }
-          $before = @(Get-ChildItem ([Environment]::GetFolderPath('MyDocuments')) -Filter '*.md' -Recurse -ErrorAction SilentlyContinue)
+          reg.exe query 'HKCU\Software\Classes' /s /f 'LeafNote' | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'LeafNote file association branding missing' }
+          $library = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Note App Library'
+          $before = @()
+          if (Test-Path -LiteralPath $library) { $before = @(Get-ChildItem -LiteralPath $library -Filter '*.md' -Recurse | ForEach-Object FullName) }
+          $token = "GHA-$env:GITHUB_RUN_ID"
+          $title = "LeafNote title $token"
+          $body = "LeafNote body $token"
           $process = Start-Process -FilePath $app.FullName -PassThru
           $shell = New-Object -ComObject WScript.Shell
           $active = $false
           for ($i=0; $i -lt 20 -and -not $active; $i++) { Start-Sleep -Milliseconds 500; $active = $shell.AppActivate('LeafNote') }
           if (-not $active) { throw 'LeafNote window did not become active' }
           $shell.SendKeys('^n'); Start-Sleep -Seconds 1
-          $shell.SendKeys('LeafNote acceptance'); $shell.SendKeys('{TAB}')
-          $shell.SendKeys('Saved by GitHub Actions'); $shell.SendKeys('^s')
+          $shell.SendKeys($title); $shell.SendKeys('{TAB}'); $shell.SendKeys($body); $shell.SendKeys('^s')
           Start-Sleep -Seconds 5
-          if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
-          $library = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Note App Library'
-          $saved = @(Get-ChildItem -LiteralPath $library -Filter '*.md' -Recurse -ErrorAction SilentlyContinue |
-            Where-Object { (Get-Content -LiteralPath $_.FullName -Raw) -match 'LeafNote acceptance|Saved by GitHub Actions' })
-          if ($saved.Count -lt 1) { throw 'UI-entered Markdown note was not saved' }
-          Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait
+          $shell.SendKeys('%{F4}')
+          if (-not $process.WaitForExit(10000)) { throw 'LeafNote did not close normally after UI save' }
+          $newNotes = @(Get-ChildItem -LiteralPath $library -Filter '*.md' -Recurse -ErrorAction SilentlyContinue | Where-Object FullName -notin $before)
+          $saved = $newNotes | Where-Object {
+            $content = Get-Content -LiteralPath $_.FullName -Raw
+            $content.Contains($title) -and $content.Contains($body)
+          } | Select-Object -First 1
+          if (-not $saved) { throw 'Title and body were not saved together in one new Markdown file' }
+          $noteSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $saved.FullName).Hash
+          $uninstall = Start-Process -FilePath $uninstaller -ArgumentList '/S' -PassThru -Wait
+          if ($uninstall.ExitCode -ne 0) { throw "Uninstaller exit code $($uninstall.ExitCode)" }
           Start-Sleep -Seconds 3
-          if (-not (Test-Path -LiteralPath $saved[0].FullName)) { throw 'Uninstall deleted Markdown data' }
+          if (-not (Test-Path -LiteralPath $saved.FullName)) { throw 'Uninstall deleted Markdown data' }
           $remaining = @(Get-ChildItem ([Environment]::GetFolderPath('Desktop')),(Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu') -Filter 'LeafNote*.lnk' -Recurse -ErrorAction SilentlyContinue)
           if ($remaining.Count -ne 0) { throw 'LeafNote shortcut remained after uninstall' }
           [pscustomobject]@{
-            scenario='fresh-install-ui-save-uninstall'; product='LeafNote'; version='1.3.15'
-            signature=$signature.Status.ToString(); markdownPreserved=$true; shortcutRemoved=$true
+            schemaVersion=1; scenario='fresh-install-ui-save-uninstall'; repo=$env:GITHUB_REPOSITORY
+            runId=$env:GITHUB_RUN_ID; headSha=$env:GITHUB_SHA; validationTag=$env:VALIDATION_TAG
+            product='LeafNote'; version='1.3.15'; setupSha=$setupSha; signature=$signature.Status.ToString()
+            installerExitCode=$installer.ExitCode; uninstallerExitCode=$uninstall.ExitCode
+            appPath=$app.FullName; notePath=$saved.FullName; noteSha=$noteSha
+            titleFound=$true; bodyFound=$true; markdownPreserved=$true; shortcutRemoved=$true
+            recordedAt=(Get-Date).ToUniversalTime().ToString('o')
           } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'fresh-evidence.json') -Encoding UTF8
       - uses: actions/upload-artifact@v4
         with:
@@ -68,43 +104,82 @@ jobs:
 
   upgrade:
     runs-on: windows-latest
+    timeout-minutes: 20
     env:
       GH_TOKEN: ${{ github.token }}
+      VALIDATION_TAG: ${{ inputs.validation_tag }}
     steps:
-      - name: Download old and new installers
+      - name: Download and verify old and new installers from validation draft
         shell: powershell
         run: |
-          gh release download v1.3.15 --repo $env:GITHUB_REPOSITORY --pattern "LeafNote-1.3.15-Windows-x64-Setup.exe" --dir $env:RUNNER_TEMP
-          gh release download v1.3.15 --repo $env:GITHUB_REPOSITORY --pattern "Note-App-1.3.6-Windows-x64-Setup.exe" --dir $env:RUNNER_TEMP
-      - name: Upgrade 1.3.6 and preserve Markdown
+          $ErrorActionPreference = 'Stop'
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'User-Agent' = 'LeafNote-Acceptance' }
+          $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases?per_page=100" -Headers $headers
+          $release = $releases | Where-Object tag_name -eq $env:VALIDATION_TAG | Select-Object -First 1
+          if (-not $release -or -not $release.draft) { throw 'Validation draft release missing' }
+          $expected = @{
+            'LeafNote-1.3.15-Windows-x64-Setup.exe' = '0C1568B4EA05A2F45BA98FCCFC684C21A8AA498C2E59CE319B31613E173944DC'
+            'Note-App-1.3.6-Windows-x64-Setup.exe' = 'F6DF23B28B3C8A462FCFFEB199A3C2F3552E4DDC59A3018EE8C15BEF72591C06'
+          }
+          foreach ($name in $expected.Keys) {
+            $asset = $release.assets | Where-Object name -eq $name | Select-Object -First 1
+            if (-not $asset) { throw "Validation asset missing: $name" }
+            $headers.Accept = 'application/octet-stream'
+            $destination = Join-Path $env:RUNNER_TEMP $name
+            Invoke-WebRequest -Uri $asset.url -Headers $headers -OutFile $destination -UseBasicParsing
+            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash
+            if ($actual -ne $expected[$name]) { throw "$name SHA mismatch: $actual" }
+          }
+      - name: Upgrade 1.3.6, verify replacement, and preserve Markdown
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $old = Join-Path $env:RUNNER_TEMP 'Note-App-1.3.6-Windows-x64-Setup.exe'
           $new = Join-Path $env:RUNNER_TEMP 'LeafNote-1.3.15-Windows-x64-Setup.exe'
-          Start-Process -FilePath $old -ArgumentList '/S' -Wait
+          $oldInstaller = Start-Process -FilePath $old -ArgumentList '/S' -PassThru -Wait
+          if ($oldInstaller.ExitCode -ne 0) { throw "1.3.6 installer exit code $($oldInstaller.ExitCode)" }
+          $oldEntry = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' |
+            Where-Object { $_.DisplayName -eq 'Note App' -and $_.DisplayVersion -eq '1.3.6' } | Select-Object -First 1
+          if (-not $oldEntry) { throw 'Note App 1.3.6 installation was not established' }
           $library = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Note App Library'
           New-Item -ItemType Directory -Path $library -Force | Out-Null
           $note = Join-Path $library 'upgrade-acceptance.md'
-          Set-Content -LiteralPath $note -Value '# Upgrade acceptance' -Encoding UTF8
-          Start-Process -FilePath $new -ArgumentList '/S' -Wait
+          Set-Content -LiteralPath $note -Value '# Upgrade acceptance invariant' -Encoding UTF8
+          $noteShaBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath $note).Hash
+          $newInstaller = Start-Process -FilePath $new -ArgumentList '/S' -PassThru -Wait
+          if ($newInstaller.ExitCode -ne 0) { throw "LeafNote installer exit code $($newInstaller.ExitCode)" }
           Start-Sleep -Seconds 4
-          if (-not (Test-Path -LiteralPath $note)) { throw 'Upgrade deleted existing Markdown' }
           $entry = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' |
-            Where-Object DisplayName -eq 'LeafNote' | Select-Object -First 1
-          if (-not $entry) { throw 'Upgrade did not register LeafNote product name' }
-          $uninstaller = $entry.UninstallString.Trim('"')
+            Where-Object { $_.DisplayName -eq 'LeafNote' -and $_.DisplayVersion -eq '1.3.15' } | Select-Object -First 1
+          if (-not $entry) { throw 'Upgrade did not replace registration with LeafNote 1.3.15' }
+          if (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' | Where-Object DisplayName -eq 'Note App') { throw 'Old Note App registration remained after upgrade' }
+          $noteShaAfterUpgrade = (Get-FileHash -Algorithm SHA256 -LiteralPath $note).Hash
+          if ($noteShaAfterUpgrade -ne $noteShaBefore) { throw 'Upgrade changed existing Markdown' }
+          if ($entry.UninstallString -match '^"([^"]+)"') { $uninstaller = $Matches[1] } else { $uninstaller = $entry.UninstallString }
           $installDir = Split-Path -Parent $uninstaller
           $app = Get-ChildItem -LiteralPath $installDir -Filter '*.exe' |
             Where-Object { $_.Name -notmatch 'unins|uninstall' -and $_.VersionInfo.ProductName -eq 'LeafNote' } |
             Select-Object -First 1
           if (-not $app -or $app.VersionInfo.ProductVersion -ne '1.3.15') { throw 'Upgrade executable metadata mismatch' }
-          Start-Process -FilePath $app.FullName -PassThru | ForEach-Object { Start-Sleep -Seconds 8; if (-not $_.HasExited) { Stop-Process -Id $_.Id -Force } }
-          Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait
-          if (-not (Test-Path -LiteralPath $note)) { throw 'Uninstall after upgrade deleted Markdown' }
+          $process = Start-Process -FilePath $app.FullName -PassThru
+          Start-Sleep -Seconds 8
+          if ($process.HasExited) { throw "Upgraded LeafNote exited early with $($process.ExitCode)" }
+          Stop-Process -Id $process.Id -Force
+          $uninstall = Start-Process -FilePath $uninstaller -ArgumentList '/S' -PassThru -Wait
+          if ($uninstall.ExitCode -ne 0) { throw "Uninstaller exit code $($uninstall.ExitCode)" }
+          $noteShaAfter = (Get-FileHash -Algorithm SHA256 -LiteralPath $note).Hash
+          if ($noteShaAfter -ne $noteShaBefore) { throw 'Uninstall changed or deleted Markdown' }
           [pscustomobject]@{
-            scenario='upgrade-1.3.6-to-1.3.15-uninstall'; product='LeafNote'; version='1.3.15'
-            legacyLibrary='Note App Library'; markdownPreserved=$true
+            schemaVersion=1; scenario='upgrade-1.3.6-to-1.3.15-uninstall'; repo=$env:GITHUB_REPOSITORY
+            runId=$env:GITHUB_RUN_ID; headSha=$env:GITHUB_SHA; validationTag=$env:VALIDATION_TAG
+            oldDisplayName=$oldEntry.DisplayName; oldDisplayVersion=$oldEntry.DisplayVersion
+            newDisplayName=$entry.DisplayName; newDisplayVersion=$entry.DisplayVersion
+            oldSetupSha=(Get-FileHash -Algorithm SHA256 -LiteralPath $old).Hash
+            newSetupSha=(Get-FileHash -Algorithm SHA256 -LiteralPath $new).Hash
+            oldInstallerExitCode=$oldInstaller.ExitCode; newInstallerExitCode=$newInstaller.ExitCode
+            uninstallerExitCode=$uninstall.ExitCode; notePath=$note
+            noteShaBefore=$noteShaBefore; noteShaAfterUpgrade=$noteShaAfterUpgrade; noteShaAfter=$noteShaAfter
+            markdownPreserved=$true; recordedAt=(Get-Date).ToUniversalTime().ToString('o')
           } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'upgrade-evidence.json') -Encoding UTF8
       - uses: actions/upload-artifact@v4
         with:
