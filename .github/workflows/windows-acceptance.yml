@@ -66,7 +66,7 @@ jobs:
           foreach ($associationKey in $associationKeys) {
             $openCommand = (Get-ItemProperty -LiteralPath $associationKey -ErrorAction Stop).'(default)'
             if (-not $openCommand -or -not $openCommand.Contains($app.FullName)) {
-              throw "LeafNote file association command missing at $associationKey: $openCommand"
+              throw "LeafNote file association command missing at ${associationKey}: $openCommand"
             }
           }
           $library = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Note App Library'
