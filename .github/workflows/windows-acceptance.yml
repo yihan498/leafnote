@@ -28,20 +28,20 @@ jobs:
           $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases?per_page=100" -Headers $headers
           $release = $releases | Where-Object tag_name -eq $env:VALIDATION_TAG | Select-Object -First 1
           if (-not $release -or -not $release.draft) { throw 'Validation draft release missing' }
-          $asset = $release.assets | Where-Object name -eq 'LeafNote-1.3.15-Windows-x64-Setup-final-r4.exe' | Select-Object -First 1
+          $asset = $release.assets | Where-Object name -eq 'LeafNote-1.3.15-Windows-x64-Setup-final-r5.exe' | Select-Object -First 1
           if (-not $asset) { throw 'LeafNote setup asset missing' }
           $headers.Accept = 'application/octet-stream'
           $destination = Join-Path $env:RUNNER_TEMP $asset.name
           Invoke-WebRequest -Uri $asset.url -Headers $headers -OutFile $destination -UseBasicParsing
           $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash
-          $expected = '295D84B631DF54E33FECEDD6461B554AB3A27B628A97EF1642FA538A1DFD0221'
+          $expected = '4F19A769F03181F36FC07154017FEC4469843F52E0671E82B63E3E19ADE58379'
           if ($actual -ne $expected) { throw "New setup SHA mismatch: $actual" }
       - name: Install, save title and body through UI, and uninstall
         shell: powershell
         timeout-minutes: 5
         run: |
           $ErrorActionPreference = 'Stop'
-          $setup = Join-Path $env:RUNNER_TEMP 'LeafNote-1.3.15-Windows-x64-Setup-final-r4.exe'
+          $setup = Join-Path $env:RUNNER_TEMP 'LeafNote-1.3.15-Windows-x64-Setup-final-r5.exe'
           $setupSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $setup).Hash
           $signature = Get-AuthenticodeSignature -LiteralPath $setup
           if ($signature.Status -ne 'NotSigned') { throw "Expected unsigned build, got $($signature.Status)" }
@@ -154,7 +154,7 @@ jobs:
           $release = $releases | Where-Object tag_name -eq $env:VALIDATION_TAG | Select-Object -First 1
           if (-not $release -or -not $release.draft) { throw 'Validation draft release missing' }
           $expected = @{
-            'LeafNote-1.3.15-Windows-x64-Setup-final-r4.exe' = '295D84B631DF54E33FECEDD6461B554AB3A27B628A97EF1642FA538A1DFD0221'
+            'LeafNote-1.3.15-Windows-x64-Setup-final-r5.exe' = '4F19A769F03181F36FC07154017FEC4469843F52E0671E82B63E3E19ADE58379'
             'Note-App-1.3.6-Windows-x64-Setup.exe' = 'F6DF23B28B3C8A462FCFFEB199A3C2F3552E4DDC59A3018EE8C15BEF72591C06'
           }
           foreach ($name in $expected.Keys) {
@@ -172,7 +172,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $old = Join-Path $env:RUNNER_TEMP 'Note-App-1.3.6-Windows-x64-Setup.exe'
-          $new = Join-Path $env:RUNNER_TEMP 'LeafNote-1.3.15-Windows-x64-Setup-final-r4.exe'
+          $new = Join-Path $env:RUNNER_TEMP 'LeafNote-1.3.15-Windows-x64-Setup-final-r5.exe'
           $oldInstaller = Start-Process -FilePath $old -ArgumentList '/S' -PassThru -Wait
           if ($oldInstaller.ExitCode -ne 0) { throw "1.3.6 installer exit code $($oldInstaller.ExitCode)" }
           $oldEntry = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' |
