@@ -90,8 +90,6 @@ jobs:
           Start-Sleep -Milliseconds 500
           $shell.SendKeys($body); $shell.SendKeys('^s')
           Start-Sleep -Seconds 5
-          $shell.SendKeys('%{F4}')
-          if (-not $process.WaitForExit(10000)) { throw 'LeafNote did not close normally after UI save' }
           $newNotes = @(Get-ChildItem -LiteralPath $library -Filter '*.md' -Recurse -ErrorAction SilentlyContinue | Where-Object FullName -notin $before)
           $saved = $newNotes | Where-Object {
             $content = Get-Content -LiteralPath $_.FullName -Raw
@@ -106,6 +104,19 @@ jobs:
             throw 'Title and body were not saved together in one new Markdown file'
           }
           $noteSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $saved.FullName).Hash
+          Write-Host 'ACCEPTANCE_PHASE saved-note-verified'
+          $shell.SendKeys('%{F4}')
+          $running = @()
+          for ($i=0; $i -lt 20; $i++) {
+            Start-Sleep -Milliseconds 500
+            $running = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object ExecutablePath -eq $app.FullName)
+            if ($running.Count -eq 0) { break }
+          }
+          if ($running.Count -ne 0) {
+            $running | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+            throw 'LeafNote did not close normally after UI save'
+          }
+          Write-Host 'ACCEPTANCE_PHASE app-exit-verified'
           $uninstall = Start-Process -FilePath $uninstaller -ArgumentList '/S' -PassThru -Wait
           if ($uninstall.ExitCode -ne 0) { throw "Uninstaller exit code $($uninstall.ExitCode)" }
           Start-Sleep -Seconds 3
