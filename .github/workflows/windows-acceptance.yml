@@ -67,12 +67,20 @@ jobs:
         timeout-minutes: 5
         run: |
           $ErrorActionPreference = 'Stop'
+          $env:LEAFNOTE_WATCHDOG_PARENT_PID = [string]$PID
+          $env:ACCEPTANCE_WATCHDOG_SECONDS = '240'
+          $env:LEAFNOTE_WATCHDOG_SECONDS = $env:ACCEPTANCE_WATCHDOG_SECONDS
+          $watchdogBody = '$parentPid = [int]$env:LEAFNOTE_WATCHDOG_PARENT_PID' + "`n" + '$seconds = [int]$env:LEAFNOTE_WATCHDOG_SECONDS' + "`n" + 'Start-Sleep -Seconds $seconds' + "`n" + 'Stop-Process -Id $parentPid -Force -ErrorAction SilentlyContinue'
+          $watchdogEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($watchdogBody))
+          $watchdog = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-NonInteractive','-EncodedCommand',$watchdogEncoded) -PassThru -WindowStyle Hidden
+          try {
           $setup = Join-Path $env:RUNNER_TEMP 'LeafNote-1.3.15-Windows-x64-Setup-final-r5.exe'
           $portable = Join-Path $env:RUNNER_TEMP 'LeafNote-1.3.15-Windows-x64-Portable-final-r5.exe'
           $setupSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $setup).Hash
           $signature = Get-AuthenticodeSignature -LiteralPath $setup
           if ($signature.Status -ne 'NotSigned') { throw "Expected unsigned build, got $($signature.Status)" }
-          $installer = Start-Process -FilePath $setup -ArgumentList '/S' -PassThru -Wait
+          $installer = Start-Process -FilePath $setup -ArgumentList '/S' -PassThru
+          if (-not $installer.WaitForExit(120000)) { Stop-Process -Id $installer.Id -Force -ErrorAction SilentlyContinue; throw 'Installer exceeded 120 seconds' }
           if ($installer.ExitCode -ne 0) { throw "Installer exit code $($installer.ExitCode)" }
           Start-Sleep -Seconds 4
           $entry = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' |
@@ -105,10 +113,12 @@ jobs:
           $title = "LeafNote title $token"
           $body = "LeafNote body $token"
           $process = Start-Process -FilePath $app.FullName -PassThru
+          Write-Host 'ACCEPTANCE_PHASE app-started'
           $shell = New-Object -ComObject WScript.Shell
           $active = $false
           for ($i=0; $i -lt 20 -and -not $active; $i++) { Start-Sleep -Milliseconds 500; $active = $shell.AppActivate('LeafNote') }
           if (-not $active) { throw 'LeafNote window did not become active' }
+          Write-Host 'ACCEPTANCE_PHASE window-active'
           for ($i=0; $i -lt 30 -and -not (Test-Path -LiteralPath $library); $i++) { Start-Sleep -Milliseconds 500 }
           if (-not (Test-Path -LiteralPath $library)) { throw 'LeafNote did not finish first-run initialization' }
           Start-Sleep -Seconds 2
@@ -122,13 +132,16 @@ jobs:
           $bodyName = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('56yU6K6w5q2j5paH57yW6L6R5Zmo'))
           $bodyCondition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty, $bodyName)
           $bodyElement = $null
+          Write-Host 'ACCEPTANCE_PHASE uia-search-started'
           for ($i=0; $i -lt 20 -and -not $bodyElement; $i++) {
             $bodyElement = $windowElement.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $bodyCondition)
             if (-not $bodyElement) { Start-Sleep -Milliseconds 250 }
           }
           if (-not $bodyElement) { throw 'LeafNote body editor was unavailable through UI Automation' }
           $bodyElement.SetFocus()
+          Write-Host 'ACCEPTANCE_PHASE uia-focus-complete'
           Start-Sleep -Milliseconds 300
+          Write-Host 'ACCEPTANCE_PHASE note-save-started'
           $shell.SendKeys($body); $shell.SendKeys('^s')
           Start-Sleep -Seconds 5
           $newNotes = @(Get-ChildItem -LiteralPath $library -Filter '*.md' -Recurse -ErrorAction SilentlyContinue | Where-Object FullName -notin $before)
@@ -146,6 +159,7 @@ jobs:
           }
           $noteSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $saved.FullName).Hash
           Write-Host 'ACCEPTANCE_PHASE saved-note-verified'
+          Write-Host 'ACCEPTANCE_PHASE note-save-verified'
           $shell.SendKeys('%{F4}')
           $running = @()
           for ($i=0; $i -lt 20; $i++) {
@@ -158,7 +172,8 @@ jobs:
             throw 'LeafNote did not close normally after UI save'
           }
           Write-Host 'ACCEPTANCE_PHASE app-exit-verified'
-          $uninstall = Start-Process -FilePath $uninstaller -ArgumentList '/S' -PassThru -Wait
+          $uninstall = Start-Process -FilePath $uninstaller -ArgumentList '/S' -PassThru
+          if (-not $uninstall.WaitForExit(120000)) { Stop-Process -Id $uninstall.Id -Force -ErrorAction SilentlyContinue; throw 'Uninstaller exceeded 120 seconds' }
           if ($uninstall.ExitCode -ne 0) { throw "Uninstaller exit code $($uninstall.ExitCode)" }
           Start-Sleep -Seconds 3
           if (-not (Test-Path -LiteralPath $saved.FullName)) { throw 'Uninstall deleted Markdown data' }
@@ -173,6 +188,9 @@ jobs:
             titleFound=$true; bodyFound=$true; markdownPreserved=$true; shortcutRemoved=$true
             recordedAt=(Get-Date).ToUniversalTime().ToString('o')
           } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'fresh-evidence.json') -Encoding UTF8
+          } finally {
+            if ($watchdog -and -not $watchdog.HasExited) { Stop-Process -Id $watchdog.Id -Force -ErrorAction SilentlyContinue }
+          }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: acceptance-evidence-fresh
@@ -196,6 +214,13 @@ jobs:
         timeout-minutes: 5
         run: |
           $ErrorActionPreference = 'Stop'
+          $env:LEAFNOTE_WATCHDOG_PARENT_PID = [string]$PID
+          $env:ACCEPTANCE_WATCHDOG_SECONDS = '240'
+          $env:LEAFNOTE_WATCHDOG_SECONDS = $env:ACCEPTANCE_WATCHDOG_SECONDS
+          $watchdogBody = '$parentPid = [int]$env:LEAFNOTE_WATCHDOG_PARENT_PID' + "`n" + '$seconds = [int]$env:LEAFNOTE_WATCHDOG_SECONDS' + "`n" + 'Start-Sleep -Seconds $seconds' + "`n" + 'Stop-Process -Id $parentPid -Force -ErrorAction SilentlyContinue'
+          $watchdogEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($watchdogBody))
+          $watchdog = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-NonInteractive','-EncodedCommand',$watchdogEncoded) -PassThru -WindowStyle Hidden
+          try {
           $portable = Join-Path $env:RUNNER_TEMP 'LeafNote-1.3.15-Windows-x64-Portable-final-r5.exe'
           $portableSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $portable).Hash
           if ($portableSha -ne '506DAA0ACC8240A46524E26E3F71EE17C755715955B80A6999281426744BA458') { throw "Portable SHA mismatch: $portableSha" }
@@ -210,10 +235,12 @@ jobs:
           $title = "Portable title $token"
           $body = "Portable body $token"
           $process = Start-Process -FilePath $portable -PassThru
+          Write-Host 'ACCEPTANCE_PHASE app-started'
           $shell = New-Object -ComObject WScript.Shell
           $active = $false
           for ($i=0; $i -lt 20 -and -not $active; $i++) { Start-Sleep -Milliseconds 500; $active = $shell.AppActivate('LeafNote') }
           if (-not $active) { throw 'Portable LeafNote window did not become active' }
+          Write-Host 'ACCEPTANCE_PHASE window-active'
           for ($i=0; $i -lt 30 -and -not (Test-Path -LiteralPath $library); $i++) { Start-Sleep -Milliseconds 500 }
           if (-not (Test-Path -LiteralPath $library)) { throw 'Portable LeafNote did not finish first-run initialization' }
           Start-Sleep -Seconds 2
@@ -227,12 +254,14 @@ jobs:
           $bodyName = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('56yU6K6w5q2j5paH57yW6L6R5Zmo'))
           $bodyCondition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty, $bodyName)
           $bodyElement = $null
+          Write-Host 'ACCEPTANCE_PHASE uia-search-started'
           for ($i=0; $i -lt 20 -and -not $bodyElement; $i++) {
             $bodyElement = $windowElement.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $bodyCondition)
             if (-not $bodyElement) { Start-Sleep -Milliseconds 250 }
           }
           if (-not $bodyElement) { throw 'Portable LeafNote body editor was unavailable through UI Automation' }
-          $bodyElement.SetFocus(); Start-Sleep -Milliseconds 300
+          $bodyElement.SetFocus(); Write-Host 'ACCEPTANCE_PHASE uia-focus-complete'; Start-Sleep -Milliseconds 300
+          Write-Host 'ACCEPTANCE_PHASE note-save-started'
           $shell.SendKeys($body); $shell.SendKeys('^s'); Start-Sleep -Seconds 5
           $newNotes = @(Get-ChildItem -LiteralPath $library -Filter '*.md' -Recurse -ErrorAction SilentlyContinue | Where-Object FullName -notin $before)
           $saved = $newNotes | Where-Object {
@@ -240,6 +269,7 @@ jobs:
             $noteContent.Contains($title) -and $noteContent.Contains($body)
           } | Select-Object -First 1
           if (-not $saved) { throw 'Portable title and body were not saved together in one Markdown file' }
+          Write-Host 'ACCEPTANCE_PHASE note-save-verified'
           $noteSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $saved.FullName).Hash
           $shell.SendKeys('%{F4}')
           $running = @()
@@ -252,6 +282,7 @@ jobs:
             $running | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
             throw 'Portable LeafNote did not close normally after UI save'
           }
+          Write-Host 'ACCEPTANCE_PHASE app-exit-verified'
           [pscustomobject]@{
             schemaVersion=1; scenario='portable-ui-save'; repo=$env:GITHUB_REPOSITORY
             runId=$env:GITHUB_RUN_ID; headSha=$env:GITHUB_SHA; validationTag=$env:VALIDATION_TAG
@@ -259,6 +290,9 @@ jobs:
             notePath=$saved.FullName; noteSha=$noteSha; titleFound=$true; bodyFound=$true; normalExit=$true
             recordedAt=(Get-Date).ToUniversalTime().ToString('o')
           } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'portable-evidence.json') -Encoding UTF8
+          } finally {
+            if ($watchdog -and -not $watchdog.HasExited) { Stop-Process -Id $watchdog.Id -Force -ErrorAction SilentlyContinue }
+          }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: acceptance-evidence-portable
