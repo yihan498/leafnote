@@ -85,7 +85,20 @@ jobs:
           Start-Sleep -Seconds 2
           $shell.SendKeys('^n'); Start-Sleep -Seconds 1
           $shell.SendKeys($title); $shell.SendKeys('{ENTER}'); Start-Sleep -Seconds 2
-          Start-Sleep -Milliseconds 500
+          Add-Type -AssemblyName UIAutomationClient
+          Add-Type -AssemblyName UIAutomationTypes
+          for ($i=0; $i -lt 20 -and $process.MainWindowHandle -eq 0; $i++) { $process.Refresh(); Start-Sleep -Milliseconds 250 }
+          if ($process.MainWindowHandle -eq 0) { throw 'LeafNote main window handle was unavailable' }
+          $windowElement = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
+          $bodyCondition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty, '笔记正文编辑器')
+          $bodyElement = $null
+          for ($i=0; $i -lt 20 -and -not $bodyElement; $i++) {
+            $bodyElement = $windowElement.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $bodyCondition)
+            if (-not $bodyElement) { Start-Sleep -Milliseconds 250 }
+          }
+          if (-not $bodyElement) { throw 'LeafNote body editor was unavailable through UI Automation' }
+          $bodyElement.SetFocus()
+          Start-Sleep -Milliseconds 300
           $shell.SendKeys($body); $shell.SendKeys('^s')
           Start-Sleep -Seconds 5
           $newNotes = @(Get-ChildItem -LiteralPath $library -Filter '*.md' -Recurse -ErrorAction SilentlyContinue | Where-Object FullName -notin $before)
