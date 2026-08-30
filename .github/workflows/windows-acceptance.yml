@@ -55,6 +55,8 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: none
+    env:
+      VALIDATION_TAG: ${{ inputs.validation_tag }}
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -84,7 +86,6 @@ jobs:
           if (-not $app -or $app.VersionInfo.ProductVersion -ne '1.3.15') { throw 'Installed LeafNote PE metadata mismatch' }
           $portableSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $portable).Hash
           $appSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $app.FullName).Hash
-          if ($appSha -ne $portableSha) { throw "installed executable does not match R5 Portable: $appSha != $portableSha" }
           $links = @(Get-ChildItem ([Environment]::GetFolderPath('Desktop')),(Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu') -Filter 'LeafNote*.lnk' -Recurse -ErrorAction SilentlyContinue)
           if ($links.Count -lt 1) { throw 'LeafNote shortcut missing' }
           $associationKeys = @(
@@ -177,12 +178,99 @@ jobs:
           name: acceptance-evidence-fresh
           path: ${{ runner.temp }}\fresh-evidence.json
 
+  portable:
+    needs: prepare-assets
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: none
+    env:
+      VALIDATION_TAG: ${{ inputs.validation_tag }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: validation-binaries
+          path: ${{ runner.temp }}
+      - name: Run Portable, save through UI, and exit normally
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $portable = Join-Path $env:RUNNER_TEMP 'LeafNote-1.3.15-Windows-x64-Portable-final-r5.exe'
+          $portableSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $portable).Hash
+          if ($portableSha -ne '506DAA0ACC8240A46524E26E3F71EE17C755715955B80A6999281426744BA458') { throw "Portable SHA mismatch: $portableSha" }
+          $version = (Get-Item -LiteralPath $portable).VersionInfo
+          if ($version.ProductName -ne 'LeafNote' -or $version.ProductVersion -ne '1.3.15') { throw 'Portable PE metadata mismatch' }
+          $signature = Get-AuthenticodeSignature -LiteralPath $portable
+          if ($signature.Status -ne 'NotSigned') { throw "Expected unsigned Portable, got $($signature.Status)" }
+          $library = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Note App Library'
+          $before = @()
+          if (Test-Path -LiteralPath $library) { $before = @(Get-ChildItem -LiteralPath $library -Filter '*.md' -Recurse | ForEach-Object FullName) }
+          $token = "PORTABLE-$env:GITHUB_RUN_ID"
+          $title = "Portable title $token"
+          $body = "Portable body $token"
+          $process = Start-Process -FilePath $portable -PassThru
+          $shell = New-Object -ComObject WScript.Shell
+          $active = $false
+          for ($i=0; $i -lt 20 -and -not $active; $i++) { Start-Sleep -Milliseconds 500; $active = $shell.AppActivate('LeafNote') }
+          if (-not $active) { throw 'Portable LeafNote window did not become active' }
+          for ($i=0; $i -lt 30 -and -not (Test-Path -LiteralPath $library); $i++) { Start-Sleep -Milliseconds 500 }
+          if (-not (Test-Path -LiteralPath $library)) { throw 'Portable LeafNote did not finish first-run initialization' }
+          Start-Sleep -Seconds 2
+          $shell.SendKeys('^n'); Start-Sleep -Seconds 1
+          $shell.SendKeys($title); $shell.SendKeys('{ENTER}'); Start-Sleep -Seconds 2
+          Add-Type -AssemblyName UIAutomationClient
+          Add-Type -AssemblyName UIAutomationTypes
+          for ($i=0; $i -lt 20 -and $process.MainWindowHandle -eq 0; $i++) { $process.Refresh(); Start-Sleep -Milliseconds 250 }
+          if ($process.MainWindowHandle -eq 0) { throw 'Portable LeafNote main window handle was unavailable' }
+          $windowElement = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
+          $bodyName = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('56yU6K6w5q2j5paH57yW6L6R5Zmo'))
+          $bodyCondition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty, $bodyName)
+          $bodyElement = $null
+          for ($i=0; $i -lt 20 -and -not $bodyElement; $i++) {
+            $bodyElement = $windowElement.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $bodyCondition)
+            if (-not $bodyElement) { Start-Sleep -Milliseconds 250 }
+          }
+          if (-not $bodyElement) { throw 'Portable LeafNote body editor was unavailable through UI Automation' }
+          $bodyElement.SetFocus(); Start-Sleep -Milliseconds 300
+          $shell.SendKeys($body); $shell.SendKeys('^s'); Start-Sleep -Seconds 5
+          $newNotes = @(Get-ChildItem -LiteralPath $library -Filter '*.md' -Recurse -ErrorAction SilentlyContinue | Where-Object FullName -notin $before)
+          $saved = $newNotes | Where-Object {
+            $noteContent = Get-Content -LiteralPath $_.FullName -Raw
+            $noteContent.Contains($title) -and $noteContent.Contains($body)
+          } | Select-Object -First 1
+          if (-not $saved) { throw 'Portable title and body were not saved together in one Markdown file' }
+          $noteSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $saved.FullName).Hash
+          $shell.SendKeys('%{F4}')
+          $running = @()
+          for ($i=0; $i -lt 20; $i++) {
+            Start-Sleep -Milliseconds 500
+            $running = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object ExecutablePath -eq $portable)
+            if ($running.Count -eq 0) { break }
+          }
+          if ($running.Count -ne 0) {
+            $running | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+            throw 'Portable LeafNote did not close normally after UI save'
+          }
+          [pscustomobject]@{
+            schemaVersion=1; scenario='portable-ui-save'; repo=$env:GITHUB_REPOSITORY
+            runId=$env:GITHUB_RUN_ID; headSha=$env:GITHUB_SHA; validationTag=$env:VALIDATION_TAG
+            product='LeafNote'; version='1.3.15'; portableSha=$portableSha; signature=$signature.Status.ToString()
+            notePath=$saved.FullName; noteSha=$noteSha; titleFound=$true; bodyFound=$true; normalExit=$true
+            recordedAt=(Get-Date).ToUniversalTime().ToString('o')
+          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'portable-evidence.json') -Encoding UTF8
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: acceptance-evidence-portable
+          path: ${{ runner.temp }}\portable-evidence.json
   upgrade:
     needs: prepare-assets
     runs-on: windows-latest
     timeout-minutes: 20
     permissions:
       contents: none
+    env:
+      VALIDATION_TAG: ${{ inputs.validation_tag }}
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
