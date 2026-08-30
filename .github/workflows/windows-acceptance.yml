@@ -82,6 +82,9 @@ jobs:
           if (-not $active) { throw 'LeafNote window did not become active' }
           $shell.SendKeys('^n'); Start-Sleep -Seconds 1
           $shell.SendKeys($title); $shell.SendKeys('{ENTER}'); Start-Sleep -Seconds 2
+          $bodyActive = $shell.AppActivate('LeafNote')
+          if (-not $bodyActive) { throw 'Body entry window did not become active' }
+          Start-Sleep -Milliseconds 500
           $shell.SendKeys($body); $shell.SendKeys('^s')
           Start-Sleep -Seconds 5
           $shell.SendKeys('%{F4}')
@@ -91,7 +94,14 @@ jobs:
             $content = Get-Content -LiteralPath $_.FullName -Raw
             $content.Contains($title) -and $content.Contains($body)
           } | Select-Object -First 1
-          if (-not $saved) { throw 'Title and body were not saved together in one new Markdown file' }
+          if (-not $saved) {
+            foreach ($candidate in $newNotes) {
+              $diagnosticContent = Get-Content -LiteralPath $candidate.FullName -Raw
+              $diagnosticBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($diagnosticContent))
+              Write-Host "DIAGNOSTIC_NOTE path=$($candidate.FullName) base64=$diagnosticBase64"
+            }
+            throw 'Title and body were not saved together in one new Markdown file'
+          }
           $noteSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $saved.FullName).Hash
           $uninstall = Start-Process -FilePath $uninstaller -ArgumentList '/S' -PassThru -Wait
           if ($uninstall.ExitCode -ne 0) { throw "Uninstaller exit code $($uninstall.ExitCode)" }
